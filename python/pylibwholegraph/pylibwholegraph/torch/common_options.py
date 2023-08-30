@@ -16,7 +16,7 @@ from optparse import OptionParser
 
 def add_training_options(parser: OptionParser):
     parser.add_option(
-        "-e", "--epochs", type="int", dest="epochs", default=24, help="number of epochs"
+        "-e", "--epochs", type="int", dest="epochs", default=2, help="number of epochs"
     )
     parser.add_option(
         "-b",

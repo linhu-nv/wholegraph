@@ -104,11 +104,11 @@ class WholeMemoryTensor(object):
         :return: Tuple of DLPack Tensors and element offsets.
         """
         if host_view:
-            return self.wmb_tensor.get_global_tensorget_all_chunked_tensor(
+            return self.wmb_tensor.get_all_chunked_tensor(
                 torch_import_from_dlpack, WholeMemoryMemoryLocation.MlHost, -1
             )
         else:
-            return self.wmb_tensor.get_global_tensorget_all_chunked_tensor(
+            return self.wmb_tensor.get_all_chunked_tensor(
                 torch_import_from_dlpack,
                 WholeMemoryMemoryLocation.MlDevice,
                 torch.cuda.current_device(),

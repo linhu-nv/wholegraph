@@ -16,6 +16,8 @@ from typing import Union, List
 from .tensor import WholeMemoryTensor
 from . import graph_ops
 from . import wholegraph_ops
+import pylibwholegraph.torch as wgth
+import numpy as np
 
 
 class GraphStructure(object):
@@ -30,11 +32,16 @@ class GraphStructure(object):
         self.edge_count = 0
         self.csr_row_ptr = None
         self.csr_col_ind = None
+        self.coo_row = None
+        self.memory_type = "chunked"
+        self.memory_location = "cuda"
+        self.id_type = torch.int32
         self.node_attributes = {}
         self.edge_attributes = {}
 
-    def set_csr_graph(
-        self, csr_row_ptr: WholeMemoryTensor, csr_col_ind: WholeMemoryTensor
+    def set_graph(
+        self, csr_row_ptr: WholeMemoryTensor, csr_col_ind: WholeMemoryTensor, coo_row: WholeMemoryTensor = None,
+        memory_type = "chunked", memory_location = "cuda", id_type = torch.int32
     ):
         """
         Set the CSR graph structure
@@ -51,6 +58,13 @@ class GraphStructure(object):
         assert csr_col_ind.dtype == torch.int32 or csr_col_ind.dtype == torch.int64
         self.csr_row_ptr = csr_row_ptr
         self.csr_col_ind = csr_col_ind
+        if not coo_row == None:
+            assert coo_row.dim() == 1
+            assert coo_row.dtype == torch.int32 or coo_row.dtype == torch.int64
+            self.coo_row = coo_row
+        self.memory_type = memory_type
+        self.memory_location = memory_location
+        self.id_type = id_type
 
     def set_node_attribute(self, attr_name: str, attr_tensor: WholeMemoryTensor):
         """
@@ -62,6 +76,51 @@ class GraphStructure(object):
         assert attr_name not in self.node_attributes
         assert attr_tensor.shape[0] == self.node_count
         self.node_attributes[attr_name] = attr_tensor
+
+    def prepare_train_edges(self):#TODO what about rank num > 1?
+        self.start_edge_idx = self.edge_count * wgth.get_rank() // wgth.get_world_size()
+        self.end_edge_idx = (
+            self.edge_count * (wgth.get_rank() + 1) // wgth.get_world_size()
+        )
+        self.truncate_count = self.edge_count // wgth.get_world_size()
+
+    def start_iter(self, batch_size):
+        self.batch_size = batch_size
+        local_edge_count = self.end_edge_idx - self.start_edge_idx
+        selected_count = self.truncate_count // batch_size * batch_size
+        self.train_edge_idx_list = (
+            torch.randperm(
+                local_edge_count, dtype=torch.int64, device="cpu", pin_memory=True
+            )
+            + self.start_edge_idx
+        )
+        self.train_edge_idx_list = self.train_edge_idx_list[:selected_count]
+        return selected_count // batch_size
+
+    def get_train_edge_batch(self, iter_id):
+        start_idx = iter_id * self.batch_size
+        end_idx = (iter_id + 1) * self.batch_size
+        if (self.memory_type == "chunked" and self.memory_location == "cuda"):
+            src_nid_tensors = self.coo_row.get_all_chunked_tensor()
+            dst_nid_tensors = self.csr_col_ind.get_all_chunked_tensor()
+            src_nid_tensor = torch.cat(src_nid_tensors)
+            dst_nid_tensor = torch.cat(dst_nid_tensors)
+            assert src_nid_tensor.dim() == 1 
+            assert dst_nid_tensor.dim() == 1
+            #src_nid = src_nid_tensor[start_idx: end_idx]
+            #dst_nid = dst_nid_tensor[start_idx: end_idx]
+            idx_tensor = torch.tensor(self.train_edge_idx_list[start_idx:end_idx], device='cuda')
+            src_nid = torch.gather(src_nid_tensor, 0, idx_tensor)
+            dst_nid = torch.gather(dst_nid_tensor, 0, idx_tensor)
+            return src_nid, dst_nid
+        else:
+            print ("not implemented yet")#TODO implement different memory types and locations
+            src_nid = torch.tensor(1, end_idx - start_idx)
+            dst_nid = torch.tensor(1, end_idx - start_idx)
+            return src_nid, dst_nid
+    
+    def per_source_negative_sample(self, src_nid):
+        return torch.tensor(np.random.randint(0, self.node_count, src_nid.shape[0]), device = 'cuda')
 
     def set_edge_attribute(self, attr_name: str, attr_tensor: WholeMemoryTensor):
         """
@@ -156,8 +215,15 @@ class GraphStructure(object):
         csr_col_ind = [None] * hops
         target_gids = [None] * (hops + 1)
         target_gids[hops] = node_ids
+        #print("this is the start of multilayer sample")
         for i in range(hops - 1, -1, -1):
             if weight_name is None:
+                #if (node_ids.size(0) == 2039):
+                #    print(len(target_gids[i + 1]), target_gids[i+1][0])
+                #gid_copy = target_gids[i+1].clone().detach()
+                #print("max neighbor ", max_neighbors[hops-i-1])
+                smallTenor = torch.tensor([1,2,3,4,5], device='cuda')
+                #print("Up: the gid size is ", gid_copy.shape[0], "first ele is ", gid_copy[0])
                 (
                     neighbor_gids_offset,
                     neighbor_gids_vdata,
@@ -167,6 +233,17 @@ class GraphStructure(object):
                     max_neighbors[hops - i - 1],
                     need_center_local_output=True,
                 )
+                if (neighbor_gids_offset == None
+                    or neighbor_gids_vdata == None
+                    or neighbor_src_lids == None):
+                    #print("Down: the gid size is ", gid_copy.shape[0])
+                    print(smallTenor)
+                    #print("first ele is ", gid_copy[0])
+                    #print("original id is ", target_gids[i+1])
+                    #print(node_ids.size(0),len(target_gids[i + 1]))
+                    #print("here is node_id:", target_gids[0])
+                    #print("then is target_gid:", target_gids[0])
+                    #print(target_gids[i+1])
             else:
                 (
                     neighbor_gids_offset,

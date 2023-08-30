@@ -155,7 +155,7 @@ def main_func():
         os.path.join(options.root_dir, "homograph_csr_col_idx"),
         torch.int,
     )
-    graph_structure.set_csr_graph(csr_row_ptr_wm_tensor, csr_col_ind_wm_tensor)
+    graph_structure.set_graph(csr_row_ptr_wm_tensor, csr_col_ind_wm_tensor)
 
     feature_comm = global_comm if options.use_global_embedding else local_comm
 

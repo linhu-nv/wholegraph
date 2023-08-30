@@ -73,4 +73,7 @@ from .data_loader import (
     get_train_dataloader,
     get_valid_test_dataloader,
 )
+from .wholememory_ops import(
+    wholememory_scatter_functor,
+)
 from .wholegraph_env import compile_cpp_extension
