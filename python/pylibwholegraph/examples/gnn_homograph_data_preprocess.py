@@ -69,14 +69,14 @@ def build_csr_and_coo(node_num, edge_list, save_dir, need_unique : bool = False)
         unique_indices = np.unique((graph_src, graph_dst), axis=1)
         graph_src = unique_indices[0, :]
         graph_dst = unique_indices[1, :]
-    values = np.arange(len(graph_src), dtype='int32')
+    #values = np.arange(len(graph_src), dtype='int32')
     print("start converting to coo graph...")
-    coo_graph = coo_matrix((values, (graph_src, graph_dst)), shape=(node_num, node_num))
+    coo_graph = coo_matrix((graph_src, (graph_src, graph_dst)), shape=(node_num, node_num))
     print("start converting to csr graph...")
     csr_graph = coo_graph.tocsr()
     csr_row = csr_graph.indptr.astype(dtype='int64')
     csr_col = csr_graph.indices.astype(dtype='int32')
-    coo_row = coo_graph.row.astype(dtype='int32')
+    coo_row = csr_graph.data.astype(dtype='int32')
     print("saving the homograph_csr_row_ptr...")
     with open(os.path.join(save_dir, "homograph_csr_row_ptr"), "wb") as f:
         csr_row.tofile(f)
