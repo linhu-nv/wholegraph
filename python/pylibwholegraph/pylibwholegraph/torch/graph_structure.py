@@ -107,8 +107,6 @@ class GraphStructure(object):
             dst_nid_tensor = torch.cat(dst_nid_tensors)
             assert src_nid_tensor.dim() == 1 
             assert dst_nid_tensor.dim() == 1
-            #src_nid = src_nid_tensor[start_idx: end_idx]
-            #dst_nid = dst_nid_tensor[start_idx: end_idx]
             idx_tensor = torch.tensor(self.train_edge_idx_list[start_idx:end_idx], device='cuda')
             src_nid = torch.gather(src_nid_tensor, 0, idx_tensor)
             dst_nid = torch.gather(dst_nid_tensor, 0, idx_tensor)

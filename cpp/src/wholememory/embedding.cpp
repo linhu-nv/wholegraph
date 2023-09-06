@@ -907,6 +907,7 @@ wholememory_error_code_t wholememory_destroy_embedding(
 {
   if (wholememory_embedding == nullptr) { return WHOLEMEMORY_INVALID_INPUT; }
   auto* embedding_impl_ptr = static_cast<wholememory::embedding_base*>(wholememory_embedding);
+  embedding_impl_ptr->deallocate();
   delete embedding_impl_ptr;
   return WHOLEMEMORY_SUCCESS;
 }

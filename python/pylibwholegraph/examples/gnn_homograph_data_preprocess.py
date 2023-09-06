@@ -17,14 +17,7 @@ from scipy.sparse import coo_matrix
 
 import numpy as np
 import torch
-#from wg_torch.graph_ops import (
-    ###check_data_integrity,
-    #numpy_dtype_to_string,
-    #load_meta_file,
-    #save_meta_file,
-    ###get_part_filename,
-    #graph_name_normalize,
-#)
+
 #TODO the following four functions are put here temporaly, to be refactored
 numpy_dtype_to_string_dict = {
     np.dtype("float16"): "half",
@@ -306,44 +299,9 @@ def download_and_convert_link_prediction(
         os.path.join(save_dir, node_feat_name_prefix), "wb"
     ) as f:
         node_feat.tofile(f)
-    #print("converting edge index...")
-    #edge_index_int32 = np.transpose(edge_index).astype(np.int32)
-    #print("saving edge index...")
-    #with open(
-    #    os.path.join(save_dir, get_part_filename(edge_index_name_prefix)), "wb"
-    #) as f:
-    #    edge_index_int32.tofile(f)
 
     assert edge_feat is None
     build_csr_and_coo(num_nodes, edge_index, save_dir)
-
-
-
-def build_homo_graph(root_dir: str, graph_name: str):
-    normalized_graph_name = graph_name_normalize(graph_name)
-    output_dir = os.path.join(root_dir, normalized_graph_name, "converted")
-    meta_file = load_meta_file(output_dir, normalized_graph_name)
-    graph_builder = wg.create_homograph_builder(torch.int32)
-    wg.graph_builder_set_shuffle_id(graph_builder, False)
-    wg.graph_builder_load_edge_data(
-        graph_builder,
-        [],
-        os.path.join(output_dir, meta_file["edges"][0]["edge_list_prefix"]),
-        False,
-        torch.int32,
-        0,
-    )
-    wg.graph_builder_set_edge_config(graph_builder, [], True, False, False)
-    wg.graph_builder_set_graph_save_file(
-        graph_builder,
-        os.path.join(output_dir, "homograph_csr_row_ptr"),
-        os.path.join(output_dir, "homograph_csr_col_idx"),
-        os.path.join(output_dir, "homograph_id_mapping"),
-    )
-
-    wg.graph_builder_build(graph_builder)
-    wg.destroy_graph_builder(graph_builder)
-
 
 if __name__ == "__main__":
     parser = OptionParser()
@@ -367,29 +325,28 @@ if __name__ == "__main__":
 
     (options, args) = parser.parse_args()
 
-    assert options.phase == "convert" or options.phase == "build"
+    #assert options.phase == "convert" or options.phase == "build"
 
-    if options.phase == "convert":
-        norm_graph_name = graph_name_normalize(options.graph_name)
-        if (
-            options.graph_name == "ogbn-papers100M"
-            or options.graph_name == "ogbn-products"
-            or options.graph_name == "ogbn-arxiv"
-        ):
-            download_and_convert_node_classification(
-                os.path.join(options.root_dir, norm_graph_name, "converted"),
-                options.root_dir,
-                options.graph_name,
-            )
-        elif (
-            options.graph_name == "ogbl-citation2"
-        ):
-            download_and_convert_link_prediction(
-                os.path.join(options.root_dir, norm_graph_name, "converted"),
-                options.root_dir,
-                options.graph_name,
-            )
-        else:
-            raise ValueError("graph name unknown.")
-    #else:
-        #build_homo_graph(os.path.join(options.root_dir), options.graph_name)
+    
+    norm_graph_name = graph_name_normalize(options.graph_name)
+    if (
+        options.graph_name == "ogbn-papers100M"
+        or options.graph_name == "ogbn-products"
+        or options.graph_name == "ogbn-arxiv"
+    ):
+        download_and_convert_node_classification(
+            os.path.join(options.root_dir, norm_graph_name, "converted"),
+            options.root_dir,
+            options.graph_name,
+        )
+    elif (
+        options.graph_name == "ogbl-citation2"
+    ):
+        download_and_convert_link_prediction(
+            os.path.join(options.root_dir, norm_graph_name, "converted"),
+            options.root_dir,
+            options.graph_name,
+        )
+    else:
+        raise ValueError("graph name unknown.")
+    
