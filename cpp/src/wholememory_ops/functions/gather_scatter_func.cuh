@@ -30,6 +30,45 @@
 #include <cooperative_groups/memcpy_async.h>
 
 namespace wholememory_ops {
+  
+#if __CUDA_ARCH__ == 900
+
+using barrier = cuda::barrier<cuda::thread_scope_block>;
+//namespace cde = cuda::device::experimental;
+
+inline __device__
+void cp_async_bulk_global_to_shared(void *__dest, const void *__src, _CUDA_VSTD::uint32_t __size, ::cuda::barrier<::cuda::thread_scope_block> &__bar)
+{
+    asm volatile(
+        "cp.async.bulk.shared::cluster.global.mbarrier::complete_tx::bytes [%0], [%1], %2, [%3];\n"
+        :
+        : "r"(static_cast<_CUDA_VSTD::uint32_t>(__cvta_generic_to_shared(__dest))),
+          "l"(static_cast<_CUDA_VSTD::uint64_t>(__cvta_generic_to_global(__src))),
+          "r"(__size),
+          "r"(static_cast<_CUDA_VSTD::uint32_t>(__cvta_generic_to_shared(::cuda::device::barrier_native_handle(__bar))))
+        : "memory");
+}
+
+inline __device__
+barrier::arrival_token barrier_arrive_tx(
+    barrier & __b,
+    //_CUDA_VSTD::ptrdiff_t __arrive_count_update,
+    _CUDA_VSTD::ptrdiff_t __transaction_count_update) {
+
+    barrier::arrival_token __token = {};
+    // On architectures pre-sm90, arrive_tx is not supported.
+    auto __bh = __cvta_generic_to_shared(cuda::device::barrier_native_handle(__b));
+    asm (
+        "mbarrier.arrive.expect_tx.release.cta.shared::cta.b64 %0, [%1], %2;"
+        : "=l"(__token)
+        : "r"(static_cast<_CUDA_VSTD::uint32_t>(__bh)),
+          "r"(static_cast<_CUDA_VSTD::uint32_t>(__transaction_count_update))
+        : "memory");
+    return __token;
+}
+
+
+#endif
 
 template <typename DataTypeT>
 __device__ __forceinline__ void mov_typed_data(DataTypeT* to, const DataTypeT* from)
@@ -365,8 +404,8 @@ void gather_temp_func(wholememory_gref_t embedding_gref,
       return;
     }
   }
-  int block_size = 128;
-  int block_count = indice_count > 1584 ? 1584 : indice_count;
+  int block_size = 1024;
+  int block_count = indice_count > 1568 ? 1568 : indice_count;
   kernel_fn<<<block_count, block_size, 0, stream>>>(embedding_gref,
                                                         embedding_desc,
                                                         static_cast<const IndexT*>(indices),
@@ -375,6 +414,89 @@ void gather_temp_func(wholememory_gref_t embedding_gref,
                                                         output_desc);
   WM_CUDA_CHECK(cudaGetLastError());
 }
+
+#if __CUDA_ARCH__ == 900
+
+template <typename InputT, typename IndexT, typename EmbeddingT, int ALIGNMENT = 1>
+__global__ void scatter_kernel_TMA(const InputT* input,
+                                    wholememory_matrix_description_t input_desc,
+                                    const IndexT* indices,
+                                    int64_t indice_count,
+                                    wholememory_gref_t embedding_gref,
+                                    wholememory_matrix_description_t embedding_desc)
+{
+  
+  auto block = cooperative_groups::this_thread_block();
+  auto mywarp = cooperative_groups::tiled_partition<32>(block);
+  __shared__ InputT shared[24576];
+  InputT* my_shared;
+  int warp_id = (threadIdx.x + blockIdx.x * blockDim.x)/32;
+  int lane_id = threadIdx.x % 32;
+
+  __shared__ barrier bar;
+  if (threadIdx.x == 0) {
+    init(&bar, blockDim.x);
+  }
+  __syncwarp();
+
+  int embedding_size       = embedding_desc.dim;
+  int64_t embedding_stride = embedding_desc.stride;
+  int block_idx = block.group_index().x;
+  int64_t input_stride     = input_desc.stride;
+  int async_copy_align = 16/sizeof(InputT);
+  int batch_size = (shm_size/(blockDim.x/32)-async_copy_align)/input_stride;//indices batch size in lines
+  typed_data_vector<EmbeddingT, ALIGNMENT> embeddings;
+  typed_data_vector<InputT, ALIGNMENT> inputs;
+  int input_off_tail = input_desc.storage_offset%async_copy_align;//this is crutial for copy alignment, 4 bytes as alignment;
+  bool use_shm = true;
+  if (batch_size <= 0) { 
+    use_shm = false; batch_size = 1;
+  }else {
+    my_shared = shared + shm_size/(blockDim.x/32)*(threadIdx.x/32);
+  }
+  for (int64_t input_idx = warp_id*batch_size; input_idx < indice_count; input_idx += gridDim.x*(blockDim.x/32)*batch_size) {
+	  int cur_idx_lines = (indice_count - input_idx) > batch_size ? batch_size : indice_count - input_idx;
+	  const InputT* input_ptr = input + input_desc.storage_offset - input_off_tail + input_stride * input_idx;
+    //this variable is also for alignment
+    if (use_shm) {
+      int copy_size = input_off_tail + cur_idx_lines*input_stride;
+      if (input_idx + cur_idx_lines < indice_count) {//input_dim * sizeof(InputT) > 4 is needed
+        copy_size = (copy_size + async_copy_align -1)/async_copy_align*async_copy_align*sizeof(InputT);
+        uint64_t token;
+        if (threadIdx.x == 0) {
+          cp_async_bulk_global_to_shared((void *)my_shared, (void *)input_ptr, copy_size, bar);
+          token = barrier_arrive_tx(bar, copy_size);
+        } else {
+          token = bar.arrive();
+        }
+        bar.wait(cuda::std::move(token));
+      } else {
+        copy_size *= sizeof(InputT);
+	      cooperative_groups::memcpy_async(mywarp, my_shared, input_ptr, copy_size);
+	      cooperative_groups::wait(mywarp);
+      }
+    }
+	  for (int e = 0; e < cur_idx_lines; e ++) {
+		  int64_t embedding_table_idx = indices[input_idx + e];
+	  	EmbeddingT *emb_ptr = &embedding_dev_ref[embedding_desc.storage_offset + embedding_table_idx*embedding_stride];
+      
+      for (int emb_idx = lane_id * ALIGNMENT; emb_idx < embedding_size; emb_idx += ALIGNMENT * 32) {
+        if (use_shm) mov_data<sizeof(InputT) * ALIGNMENT>(&inputs, my_shared + input_off_tail + e*input_stride + emb_idx);
+        else mov_data<sizeof(InputT) * ALIGNMENT>(&inputs, input_ptr + input_off_tail + e*input_stride + emb_idx);
+#pragma unroll
+        for (int sub_idx = 0; sub_idx < ALIGNMENT; sub_idx++) {
+          typed_data_vector_at(embeddings, sub_idx) =
+            convert_type<InputT, EmbeddingT>(typed_data_vector_at(inputs, sub_idx));
+        }
+        mov_data<sizeof(EmbeddingT) * ALIGNMENT>(emb_ptr + emb_idx, &embeddings);
+      }
+	  }
+    mywarp.sync();
+  }
+  return ;
+}
+
+#endif
 
 template <typename InputT, typename IndexT, typename EmbeddingT, int ALIGNMENT = 1>
 __global__ void scatter_func_kernel(const InputT* input,
@@ -396,10 +518,9 @@ __global__ void scatter_func_kernel(const InputT* input,
   int64_t embedding_stride = embedding_desc.stride;
   int block_idx = block.group_index().x;
   int64_t input_stride     = input_desc.stride;
-  int async_copy_align = 4;
+  int async_copy_align = 4/sizeof(InputT);
 
   int shm_size = 24576/sizeof(InputT);
-
   int batch_size = (shm_size/(blockDim.x/32)-async_copy_align)/input_stride;//indices batch size in lines
   wholememory::device_reference<EmbeddingT> embedding_dev_ref(embedding_gref);
 
@@ -417,9 +538,10 @@ __global__ void scatter_func_kernel(const InputT* input,
 	  const InputT* input_ptr = input + input_desc.storage_offset - input_off_tail + input_stride * input_idx;
     //this variable is also for alignment
     if (use_shm) {
-      int copy_size = (input_off_tail + cur_idx_lines*input_stride)*sizeof(InputT);
+      int copy_size = input_off_tail + cur_idx_lines*input_stride;
       if (input_idx + cur_idx_lines < indice_count)//input_dim * sizeof(InputT) > 4 is needed
         copy_size = (copy_size + async_copy_align -1)/async_copy_align*async_copy_align;
+      copy_size *= sizeof(InputT);
       //for (int off = 0; off+4 < copy_size; off += 4)
 	    //  asm("cp.async.ca.shared.global [%0], [%1], 4;\n"::"l"(my_shared+off), "l"(input_ptr+off));
       cooperative_groups::memcpy_async(mywarp, my_shared, input_ptr, copy_size);
@@ -474,6 +596,37 @@ void scatter_temp_func(const void* input,
                     int64_t,
                     wholememory_gref_t,
                     wholememory_matrix_description_t) = nullptr;
+  int block_size, block_count;
+#if (__CUDA_ARCH__ == 900)// && embedding_desc.sizes[1]*sizeof(EmbeddingT) >= 4096)
+  switch (alignment) {
+    case 16: {
+      kernel_fn = scatter_kernel_TMA<InputT, IndexT, EmbeddingT, 16>;
+      break;
+    }
+    case 8: {
+      kernel_fn = scatter_kernel_TMA<InputT, IndexT, EmbeddingT, 8>;
+      break;
+    }
+    case 4: {
+      kernel_fn = scatter_kernel_TMA<InputT, IndexT, EmbeddingT, 4>;
+      break;
+    }
+    case 2: {
+      kernel_fn = scatter_kernel_TMA<InputT, IndexT, EmbeddingT, 2>;
+      break;
+    }
+    case 1: {
+      kernel_fn = scatter_kernel_TMA<InputT, IndexT, EmbeddingT, 1>;
+      break;
+    }
+    default: {
+      WHOLEMEMORY_FAIL("scatter func alignment=%d.", alignment);
+      return;
+    }
+  }
+  block_size = 32;
+  block_count = indice_count > 2048 ? 2048 : indice_count;
+#else
   switch (alignment) {
     case 16: {
       kernel_fn = scatter_func_kernel<InputT, IndexT, EmbeddingT, 16>;
@@ -500,8 +653,10 @@ void scatter_temp_func(const void* input,
       return;
     }
   }
-  int block_size = 256;
-  int block_count = indice_count > 2048 ? 2048 : indice_count;
+  block_size = 256;
+  block_count = indice_count > 1568 ? 1568 : indice_count;
+#endif
+  
   kernel_fn<<<block_count, block_size, 0, stream>>>(static_cast<const InputT*>(input),
                                                         input_desc,
                                                         static_cast<const IndexT*>(indices),
