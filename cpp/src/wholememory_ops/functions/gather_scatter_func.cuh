@@ -28,6 +28,8 @@
 
 #include <cooperative_groups.h>
 #include <cooperative_groups/memcpy_async.h>
+#include <cuda/barrier>
+#include <cuda/std/utility>
 
 namespace wholememory_ops {
   
@@ -418,7 +420,7 @@ void gather_temp_func(wholememory_gref_t embedding_gref,
 #if __CUDA_ARCH__ == 900
 
 template <typename InputT, typename IndexT, typename EmbeddingT, int ALIGNMENT = 1>
-__global__ void scatter_kernel_TMA(const InputT* input,
+__global__ void scatter_func_kernel(const InputT* input,
                                     wholememory_matrix_description_t input_desc,
                                     const IndexT* indices,
                                     int64_t indice_count,
@@ -428,7 +430,7 @@ __global__ void scatter_kernel_TMA(const InputT* input,
   
   auto block = cooperative_groups::this_thread_block();
   auto mywarp = cooperative_groups::tiled_partition<32>(block);
-  __shared__ InputT shared[24576];
+  __shared__ char shared[24576];
   InputT* my_shared;
   int warp_id = (threadIdx.x + blockIdx.x * blockDim.x)/32;
   int lane_id = threadIdx.x % 32;
@@ -439,11 +441,12 @@ __global__ void scatter_kernel_TMA(const InputT* input,
   }
   __syncwarp();
 
-  int embedding_size       = embedding_desc.dim;
+  int embedding_size       = embedding_desc.sizes[1];
   int64_t embedding_stride = embedding_desc.stride;
   int block_idx = block.group_index().x;
   int64_t input_stride     = input_desc.stride;
   int async_copy_align = 16/sizeof(InputT);
+  int shm_size = 24576/sizeof(InputT);
   int batch_size = (shm_size/(blockDim.x/32)-async_copy_align)/input_stride;//indices batch size in lines
   typed_data_vector<EmbeddingT, ALIGNMENT> embeddings;
   typed_data_vector<InputT, ALIGNMENT> inputs;
@@ -452,8 +455,9 @@ __global__ void scatter_kernel_TMA(const InputT* input,
   if (batch_size <= 0) { 
     use_shm = false; batch_size = 1;
   }else {
-    my_shared = shared + shm_size/(blockDim.x/32)*(threadIdx.x/32);
+    my_shared = reinterpret_cast<InputT*>(shared) + shm_size/(blockDim.x/32)*(threadIdx.x/32);
   }
+  wholememory::device_reference<EmbeddingT> embedding_dev_ref(embedding_gref);
   for (int64_t input_idx = warp_id*batch_size; input_idx < indice_count; input_idx += gridDim.x*(blockDim.x/32)*batch_size) {
 	  int cur_idx_lines = (indice_count - input_idx) > batch_size ? batch_size : indice_count - input_idx;
 	  const InputT* input_ptr = input + input_desc.storage_offset - input_off_tail + input_stride * input_idx;
@@ -496,7 +500,7 @@ __global__ void scatter_kernel_TMA(const InputT* input,
   return ;
 }
 
-#endif
+#else
 
 template <typename InputT, typename IndexT, typename EmbeddingT, int ALIGNMENT = 1>
 __global__ void scatter_func_kernel(const InputT* input,
@@ -568,7 +572,7 @@ __global__ void scatter_func_kernel(const InputT* input,
   }
   return ;
 }
-
+#endif
 template <typename InputT, typename IndexT, typename EmbeddingT>
 void scatter_temp_func(const void* input,
                        wholememory_matrix_description_t input_desc,
@@ -597,36 +601,6 @@ void scatter_temp_func(const void* input,
                     wholememory_gref_t,
                     wholememory_matrix_description_t) = nullptr;
   int block_size, block_count;
-#if (__CUDA_ARCH__ == 900)// && embedding_desc.sizes[1]*sizeof(EmbeddingT) >= 4096)
-  switch (alignment) {
-    case 16: {
-      kernel_fn = scatter_kernel_TMA<InputT, IndexT, EmbeddingT, 16>;
-      break;
-    }
-    case 8: {
-      kernel_fn = scatter_kernel_TMA<InputT, IndexT, EmbeddingT, 8>;
-      break;
-    }
-    case 4: {
-      kernel_fn = scatter_kernel_TMA<InputT, IndexT, EmbeddingT, 4>;
-      break;
-    }
-    case 2: {
-      kernel_fn = scatter_kernel_TMA<InputT, IndexT, EmbeddingT, 2>;
-      break;
-    }
-    case 1: {
-      kernel_fn = scatter_kernel_TMA<InputT, IndexT, EmbeddingT, 1>;
-      break;
-    }
-    default: {
-      WHOLEMEMORY_FAIL("scatter func alignment=%d.", alignment);
-      return;
-    }
-  }
-  block_size = 32;
-  block_count = indice_count > 2048 ? 2048 : indice_count;
-#else
   switch (alignment) {
     case 16: {
       kernel_fn = scatter_func_kernel<InputT, IndexT, EmbeddingT, 16>;
@@ -653,6 +627,10 @@ void scatter_temp_func(const void* input,
       return;
     }
   }
+#if (__CUDA_ARCH__ == 900)// && embedding_desc.sizes[1]*sizeof(EmbeddingT) >= 4096)
+  block_size = 32;
+  block_count = indice_count > 2048 ? 2048 : indice_count;
+#else
   block_size = 256;
   block_count = indice_count > 1568 ? 1568 : indice_count;
 #endif
