@@ -369,10 +369,7 @@ void gather_temp_func(wholememory_gref_t embedding_gref,
   int wm_alignment   = determine_wholememory_alignment_elt_count(embedding_desc);
   int mm_alignment   = determine_memory_alignment_elt_count(output, output_desc);
   int alignment      = std::min<int>(wm_alignment, mm_alignment);
-  //int embedding_size = embedding_desc.sizes[1];
-  //int thread_num       = wholememory::div_rounding_up_safe<int>(embedding_size, alignment);
-  //thread_num           = std::min(thread_num, 512);
-  //int64_t block_count = indice_count >= 1024 ? 1024 : static_cast<int>(indice_count);
+  
   
   void (*kernel_fn)(wholememory_gref_t,
                     wholememory_matrix_description_t,
@@ -419,6 +416,9 @@ void gather_temp_func(wholememory_gref_t embedding_gref,
 
 #if __CUDA_ARCH__ == 900
 
+#define sca_bsize 32
+#define sca_bnum 2048
+
 template <typename InputT, typename IndexT, typename EmbeddingT, int ALIGNMENT = 1>
 __global__ void scatter_func_kernel(const InputT* input,
                                     wholememory_matrix_description_t input_desc,
@@ -430,7 +430,7 @@ __global__ void scatter_func_kernel(const InputT* input,
   
   auto block = cooperative_groups::this_thread_block();
   auto mywarp = cooperative_groups::tiled_partition<32>(block);
-  __shared__ char shared[24576];
+  __shared__  alignas(16) char shared[24576];
   InputT* my_shared;
   int warp_id = (threadIdx.x + blockIdx.x * blockDim.x)/32;
   int lane_id = threadIdx.x % 32;
@@ -450,7 +450,7 @@ __global__ void scatter_func_kernel(const InputT* input,
   int batch_size = (shm_size/(blockDim.x/32)-async_copy_align)/input_stride;//indices batch size in lines
   typed_data_vector<EmbeddingT, ALIGNMENT> embeddings;
   typed_data_vector<InputT, ALIGNMENT> inputs;
-  int input_off_tail = input_desc.storage_offset%async_copy_align;//this is crutial for copy alignment, 4 bytes as alignment;
+  int input_off_tail;
   bool use_shm = true;
   if (batch_size <= 0) { 
     use_shm = false; batch_size = 1;
@@ -459,12 +459,14 @@ __global__ void scatter_func_kernel(const InputT* input,
   }
   wholememory::device_reference<EmbeddingT> embedding_dev_ref(embedding_gref);
   for (int64_t input_idx = warp_id*batch_size; input_idx < indice_count; input_idx += gridDim.x*(blockDim.x/32)*batch_size) {
-	  int cur_idx_lines = (indice_count - input_idx) > batch_size ? batch_size : indice_count - input_idx;
-	  const InputT* input_ptr = input + input_desc.storage_offset - input_off_tail + input_stride * input_idx;
+    int cur_idx_lines = (indice_count - input_idx) > batch_size ? batch_size : indice_count - input_idx;
+    const InputT* input_ptr = input + input_desc.storage_offset + input_stride * input_idx;
+    input_off_tail = ((unsigned long)input_ptr &0xf)/sizeof(InputT);
+    input_ptr -= input_off_tail;
     //this variable is also for alignment
     if (use_shm) {
       int copy_size = input_off_tail + cur_idx_lines*input_stride;
-      if (input_idx + cur_idx_lines < indice_count) {//input_dim * sizeof(InputT) > 4 is needed
+      if (input_idx + cur_idx_lines < indice_count - 1 && sizeof(InputT)*input_stride >= 4096) {
         copy_size = (copy_size + async_copy_align -1)/async_copy_align*async_copy_align*sizeof(InputT);
         uint64_t token;
         if (threadIdx.x == 0) {
@@ -502,6 +504,8 @@ __global__ void scatter_func_kernel(const InputT* input,
 
 #else
 
+#define sca_bsize 256
+#define sca_bnum 1568
 template <typename InputT, typename IndexT, typename EmbeddingT, int ALIGNMENT = 1>
 __global__ void scatter_func_kernel(const InputT* input,
                                     wholememory_matrix_description_t input_desc,
@@ -538,8 +542,8 @@ __global__ void scatter_func_kernel(const InputT* input,
     my_shared = all_sh + shm_size/(blockDim.x/32)*(threadIdx.x/32);
   }
   for (int64_t input_idx = warp_id*batch_size; input_idx < indice_count; input_idx += gridDim.x*(blockDim.x/32)*batch_size) {
-	  int cur_idx_lines = (indice_count - input_idx) > batch_size ? batch_size : indice_count - input_idx;
-	  const InputT* input_ptr = input + input_desc.storage_offset - input_off_tail + input_stride * input_idx;
+    int cur_idx_lines = (indice_count - input_idx) > batch_size ? batch_size : indice_count - input_idx;
+    const InputT* input_ptr = input + input_desc.storage_offset - input_off_tail + input_stride * input_idx;
     //this variable is also for alignment
     if (use_shm) {
       int copy_size = input_off_tail + cur_idx_lines*input_stride;
@@ -627,13 +631,13 @@ void scatter_temp_func(const void* input,
       return;
     }
   }
-#if (__CUDA_ARCH__ == 900)// && embedding_desc.sizes[1]*sizeof(EmbeddingT) >= 4096)
-  block_size = 32;
-  block_count = indice_count > 2048 ? 2048 : indice_count;
-#else
-  block_size = 256;
-  block_count = indice_count > 1568 ? 1568 : indice_count;
-#endif
+
+  block_size = sca_bsize;
+  block_count = indice_count > sca_bnum ? sca_bnum : indice_count;
+  if (input_desc.stride * sizeof(InputT) < 4096) {
+    block_size = 256;
+    block_count = indice_count > 1568 ? 1568 : indice_count;
+  }
   
   kernel_fn<<<block_count, block_size, 0, stream>>>(static_cast<const InputT*>(input),
                                                         input_desc,
