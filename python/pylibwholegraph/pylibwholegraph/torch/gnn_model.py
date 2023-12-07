@@ -188,6 +188,25 @@ def layer_forward(layer, x_feat, x_target_feat, sub_graph):
     return x_feat
 
 
+class subgraphAndEmbs():
+    def __init__(
+        self,
+        _target_gids,
+        _edge_indice,
+        _csr_row_ptrs,
+        _csr_col_inds,
+        _x_feat,
+    ):
+        self.target_gids = _target_gids
+        self.edge_indices = _edge_indice
+        self.csr_row_ptrs = _csr_row_ptrs
+        self.csr_col_inds = _csr_col_inds
+        self.x_feat = _x_feat
+
+    def get_my_data(self):
+        return self.target_gids, self.edge_indices, self.csr_row_ptrs, self.csr_col_inds, self.x_feat
+
+
 class HomoGNNModel(torch.nn.Module):
     def __init__(
         self,
@@ -219,8 +238,7 @@ class HomoGNNModel(torch.nn.Module):
         self.max_neighbors = parse_max_neighbors(options.layernum, options.neighbors)
         self.max_inference_neighbors = parse_max_neighbors(options.layernum, options.inferencesample)
 
-    def forward(self, ids):
-        global framework_name
+    def get_a_batch(self, ids):
         max_neighbors = self.max_neighbors if self.training else self.max_inference_neighbors
         ids = ids.to(self.graph_structure.csr_col_ind.dtype).cuda()
         (
@@ -232,6 +250,19 @@ class HomoGNNModel(torch.nn.Module):
             ids, max_neighbors
         )
         x_feat = self.gather_fn(target_gids[0], force_dtype=torch.float32)
+        fetched_data = subgraphAndEmbs(target_gids, edge_indice, csr_row_ptrs, csr_col_inds, x_feat)
+        return fetched_data
+
+    def forward(self, graph_and_emb: subgraphAndEmbs):
+        global framework_name
+        max_neighbors = self.max_neighbors if self.training else self.max_inference_neighbors
+        (
+            target_gids,
+            edge_indice,
+            csr_row_ptrs,
+            csr_col_inds,
+            x_feat,
+        ) = graph_and_emb.get_my_data()
         for i in range(self.num_layer):
             x_target_feat = x_feat[: target_gids[i + 1].numel()]
             sub_graph = create_sub_graph(

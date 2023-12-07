@@ -40,18 +40,43 @@ parser.add_option(
 
 
 def valid_test(dataloader, model, name):
+    default_stream = torch.cuda.current_stream()
+    gnn_layer_stream = torch.cuda.Stream()
+    cur_batch_data = None
+    next_batch_data = None
+    cur_label = None
+    next_label = None
     total_correct = 0
     total_valid_sample = 0
     if wgth.get_rank() == 0:
         print("%s..." % (name,))
     for i, (idx, label) in enumerate(dataloader):
-        label = torch.reshape(label, (-1,)).cuda()
-        model.eval()
-        logits = model(idx)
-        pred = torch.argmax(logits, 1)
-        correct = (pred == label).sum()
-        total_correct += correct.cpu()
-        total_valid_sample += label.shape[0]
+        cur_batch_data = model.module.get_a_batch(idx)
+        cur_label = torch.reshape(label, (-1,)).cuda()
+        break
+    for i, (idx, label) in enumerate(dataloader):
+        if i == 0:
+            continue
+        with torch.cuda.stream(gnn_layer_stream):
+            model.eval()
+            logits = model(cur_batch_data)
+            pred = torch.argmax(logits, 1)
+            correct = (pred == cur_label).sum()
+            total_correct += correct.cpu()
+            total_valid_sample += cur_label.shape[0]
+        with torch.cuda.stream(default_stream):
+            next_batch_data = model.module.get_a_batch(idx)
+            next_label = torch.reshape(label, (-1,)).cuda()
+        torch.cuda.synchronize()
+        cur_label = next_label
+        cur_batch_data = next_batch_data
+    model.eval()
+    logits = model(cur_batch_data)
+    pred = torch.argmax(logits, 1)
+    correct = (pred == cur_label).sum()
+    total_correct += correct.cpu()
+    total_valid_sample += cur_label.shape[0]
+
     if wgth.get_rank() == 0:
         print(
             "[%s] [%s] accuracy=%5.2f%%"
@@ -88,18 +113,36 @@ def train(train_data, valid_data, model, optimizer, wm_optimizer, global_comm):
     train_step = 0
     epoch = 0
     loss_fcn = torch.nn.CrossEntropyLoss()
+    default_stream = torch.cuda.current_stream()
+    gnn_layer_stream = torch.cuda.Stream()
     train_start_time = time.time()
+    cur_batch_data = None
+    next_batch_data = None
+    cur_label = None
+    next_label = None
     while epoch < options.epochs:
         for i, (idx, label) in enumerate(train_dataloader):
-            label = torch.reshape(label, (-1,)).cuda()
-            optimizer.zero_grad()
-            model.train()
-            logits = model(idx)
-            loss = loss_fcn(logits, label)
-            loss.backward()
-            optimizer.step()
-            if wm_optimizer is not None:
-                wm_optimizer.step(options.lr * 0.1)
+            cur_batch_data = model.module.get_a_batch(idx)
+            cur_label = torch.reshape(label, (-1,)).cuda()
+            break
+        for i, (idx, label) in enumerate(train_dataloader):
+            if i == 0:
+                continue
+            with torch.cuda.stream(gnn_layer_stream):
+                optimizer.zero_grad()
+                model.train()
+                logits = model(cur_batch_data)
+                loss = loss_fcn(logits, cur_label)
+                loss.backward()
+                optimizer.step()
+                if wm_optimizer is not None:
+                    wm_optimizer.step(options.lr * 0.1)
+            with torch.cuda.stream(default_stream):
+                next_batch_data = model.module.get_a_batch(idx)
+                next_label = torch.reshape(label, (-1,)).cuda()
+            torch.cuda.synchronize()
+            cur_label = next_label
+            cur_batch_data = next_batch_data
             if wgth.get_rank() == 0 and train_step % 100 == 0:
                 print(
                     "[%s] [LOSS] step=%d, loss=%f"
@@ -110,6 +153,14 @@ def train(train_data, valid_data, model, optimizer, wm_optimizer, global_comm):
                     )
                 )
             train_step = train_step + 1
+        optimizer.zero_grad()
+        model.train()
+        logits = model(cur_batch_data)
+        loss = loss_fcn(logits, cur_label)
+        loss.backward()
+        optimizer.step()
+        if wm_optimizer is not None:
+            wm_optimizer.step(options.lr * 0.1)
         epoch = epoch + 1
     global_comm.barrier()
     train_end_time = time.time()
