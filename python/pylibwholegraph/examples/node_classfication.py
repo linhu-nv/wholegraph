@@ -57,6 +57,9 @@ def valid_test(dataloader, model, name):
     for i, (idx, label) in enumerate(dataloader):
         if i == 0:
             continue
+        with torch.cuda.stream(default_stream):
+            next_batch_data = model.module.get_a_batch(idx)
+            next_label = torch.reshape(label, (-1,)).cuda()
         with torch.cuda.stream(gnn_layer_stream):
             model.eval()
             logits = model(cur_batch_data)
@@ -64,12 +67,10 @@ def valid_test(dataloader, model, name):
             correct = (pred == cur_label).sum()
             total_correct += correct.cpu()
             total_valid_sample += cur_label.shape[0]
-        with torch.cuda.stream(default_stream):
-            next_batch_data = model.module.get_a_batch(idx)
-            next_label = torch.reshape(label, (-1,)).cuda()
         torch.cuda.synchronize()
         cur_label = next_label
         cur_batch_data = next_batch_data
+        torch.cuda.synchronize()
     model.eval()
     logits = model(cur_batch_data)
     pred = torch.argmax(logits, 1)
@@ -128,21 +129,19 @@ def train(train_data, valid_data, model, optimizer, wm_optimizer, global_comm):
         for i, (idx, label) in enumerate(train_dataloader):
             if i == 0:
                 continue
+            with torch.cuda.stream(default_stream):
+                next_batch_data = model.module.get_a_batch(idx)
+                next_label = torch.reshape(label, (-1,)).cuda()
             with torch.cuda.stream(gnn_layer_stream):
                 optimizer.zero_grad()
                 model.train()
                 logits = model(cur_batch_data)
-                loss = loss_fcn(logits, cur_label)
-                loss.backward()
-                optimizer.step()
-                if wm_optimizer is not None:
-                    wm_optimizer.step(options.lr * 0.1)
-            with torch.cuda.stream(default_stream):
-                next_batch_data = model.module.get_a_batch(idx)
-                next_label = torch.reshape(label, (-1,)).cuda()
             torch.cuda.synchronize()
-            cur_label = next_label
-            cur_batch_data = next_batch_data
+            loss = loss_fcn(logits, cur_label)
+            loss.backward()
+            optimizer.step()
+            if wm_optimizer is not None:
+                wm_optimizer.step(options.lr * 0.1)
             if wgth.get_rank() == 0 and train_step % 100 == 0:
                 print(
                     "[%s] [LOSS] step=%d, loss=%f"
@@ -153,6 +152,9 @@ def train(train_data, valid_data, model, optimizer, wm_optimizer, global_comm):
                     )
                 )
             train_step = train_step + 1
+            cur_label = next_label
+            cur_batch_data = next_batch_data
+            torch.cuda.synchronize()
         optimizer.zero_grad()
         model.train()
         logits = model(cur_batch_data)
