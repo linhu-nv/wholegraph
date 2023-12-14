@@ -291,8 +291,10 @@ if __name__ == '__main__':
     parser.add_argument("--num_trainers_per_machine", type=int, default=1,
                         help="the number of trainers per machine. The trainer ids are stored\
                                 in the node feature 'trainer_id'")
+    parser.add_argument("--load_node_map", type=bool, default=True,
+                        help="determine build or load partitioned graph node map")
     # graph-related arguments
-    parser.add_argument("--dataset", type=str, default="obgn-products",
+    parser.add_argument("--dataset", type=str, default="ogbn-products",
                         help="datasets: ogbn-products, ogbn-papers100M")
     parser.add_argument('--ogb_root_dir', type=str, default='dataset',
                         help='root dir of containing ogb datasets')
@@ -306,22 +308,22 @@ if __name__ == '__main__':
     args = parser.parse_args()
     # load data for dgl graph partition
     start = time.time()
-    '''
-    graph, _ = load_data(args)
-    print("load {} takes {:.3f} seconds".format(args.dataset, time.time() - start))
-    print(
-        "train: {}, valid: {}, test: {}".format(
-            th.sum(graph.ndata["train_mask"]),
-            th.sum(graph.ndata["val_mask"]),
-            th.sum(graph.ndata["test_mask"]),
+    if args.load_node_map is False:
+        graph, _ = load_data(args)
+        print("load {} takes {:.3f} seconds".format(args.dataset, time.time() - start))
+        print(
+            "train: {}, valid: {}, test: {}".format(
+                th.sum(graph.ndata["train_mask"]),
+                th.sum(graph.ndata["val_mask"]),
+                th.sum(graph.ndata["test_mask"]),
+            )
         )
-    )
-    '''
+        # graph partition
+        node_map = graph_partition(args, graph).numpy()
+        np.save("node_map_ogbn_products.npy", node_map)
+    else:
+        node_map = np.load('node_map_' + str(args.dataset) + '.npy')
     gp_start = time.time()
-    # graph partition
-    # node_map = graph_partition(args, graph).numpy()
-    # np.save("node_map_ogbn_products.npy", node_map)
-    node_map = np.load("node_map_ogbn_products.npy")
     print("graph partition {} takes {:.3f} seconds".format(args.dataset, time.time() - gp_start))
     bps_start = time.time()
     # build partitioned subgraphs
