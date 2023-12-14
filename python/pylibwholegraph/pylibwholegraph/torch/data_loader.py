@@ -28,6 +28,37 @@ class NodeClassificationDataset(Dataset):
         return len(self.dataset)
 
 
+def create_node_claffication_datasets_partitioned(pickle_data_path: str, my_rank: int):
+    with open(pickle_data_path + str(my_rank) + '.pkl', "rb") as f:
+        data_and_label = pickle.load(f)
+    train_data = {
+        "idx": data_and_label["train_idx"],
+        "label": data_and_label["train_label"],
+    }
+    valid_data = {
+        "idx": data_and_label["valid_idx"],
+        "label": data_and_label["valid_label"],
+    }
+    test_data = {
+        "idx": data_and_label["test_idx"],
+        "label": data_and_label["test_label"],
+    }
+    train_dataset = list(
+        list(zip(train_data["idx"], np.array(train_data["label"], dtype=np.int64)))
+    )
+    valid_dataset = list(
+        list(zip(valid_data["idx"], np.array(valid_data["label"], dtype=np.int64)))
+    )
+    test_dataset = list(
+        list(zip(test_data["idx"], np.array(test_data["label"], dtype=np.int64)))
+    )
+    return (
+        NodeClassificationDataset(train_dataset),
+        NodeClassificationDataset(valid_dataset),
+        NodeClassificationDataset(test_dataset),
+    )
+
+
 def create_node_claffication_datasets(pickle_data_filename: str):
     with open(pickle_data_filename, "rb") as f:
         data_and_label = pickle.load(f)
@@ -61,6 +92,22 @@ def create_node_claffication_datasets(pickle_data_filename: str):
     )
 
 
+def get_train_dataloader_partitioned(
+    train_dataset,
+    batch_size: int,
+    num_workers: int = 0
+):
+    return torch.utils.data.DataLoader(
+        train_dataset,
+        batch_size=batch_size,
+        shuffle=True,
+        num_workers=num_workers,
+        drop_last=True,
+        pin_memory=True,
+        persistent_workers=True if num_workers > 0 else None,
+    )
+
+
 def get_train_dataloader(
     train_dataset,
     batch_size: int,
@@ -85,6 +132,21 @@ def get_train_dataloader(
         sampler=train_sampler,
     )
     return train_dataloader
+
+
+def get_valid_test_dataloader_partitioned(
+    valid_test_dataset,
+    batch_size: int,
+    num_workers: int = 0
+):
+    return torch.utils.data.DataLoader(
+        valid_test_dataset,
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=num_workers,
+        drop_last=False,
+        pin_memory=True,
+    )
 
 
 def get_valid_test_dataloader(

@@ -69,8 +69,11 @@ from .common_options import (
 
 from .gnn_model import set_framework, create_gnn_layers, create_sub_graph, HomoGNNModel
 from .data_loader import (
+    create_node_claffication_datasets_partitioned,
     create_node_claffication_datasets,
+    get_train_dataloader_partitioned,
     get_train_dataloader,
+    get_valid_test_dataloader_partitioned,
     get_valid_test_dataloader,
 )
 from .wholegraph_env import compile_cpp_extension
