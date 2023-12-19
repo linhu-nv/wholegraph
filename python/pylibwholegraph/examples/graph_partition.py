@@ -88,11 +88,13 @@ def build_partitioned_subgraphs(args, new2origin_node_map):
         split_idx["test"],
     )
     print("train idx ", len(train_idx), "valid_idx", len(valid_idx), "test index", len(test_idx))
-    assert len(train_idx) + len(valid_idx) + len(test_idx) == len(new2origin_node_map)
     num_part = args.num_parts
     node_num = len(new2origin_node_map)
     rank_node_num = int((node_num + num_part - 1) / num_part)
     rank_train_node_num = int((len(train_idx) + num_part - 1) / num_part)
+    rank_test_node_num = int((len(test_idx) + num_part - 1) / num_part)
+    rank_valid_node_num = int((len(valid_idx) + num_part - 1) / num_part)
+    rank_other_node_num = rank_node_num - rank_train_node_num - rank_test_node_num - rank_valid_node_num
     convert_dir = args.dataset + '/' + args.convert_dir
 
     originid2labeltype = np.zeros_like(node_map)
@@ -110,58 +112,50 @@ def build_partitioned_subgraphs(args, new2origin_node_map):
     dgl_part_off.append(node_num)
     print("the dgl_part_off is ", dgl_part_off)
 
-    # balance train indices and node num among partitions
-    rank_valid_test_node_num = rank_node_num - rank_train_node_num
-    real_ranks_train_nodes = [0] * num_part
-    real_ranks_other_nodes = [0] * num_part
-    extra_train_nodes = []
-    extra_other_nodes = []
+    # balance train indices, valid indices, test indices and and node num among partitions
+    # 0: other nodes, 1:train nodes, 2:valid nodes, 3:test nodes
+    real_ranks_nodes = [[0] * 4 for i in range(num_part)]
+    extra_nodes = [list() for i in range(4)]
     ranks_node_id = [list() for i in range(num_part)]
     for i in range(num_part):  # scan all nodes, collect already-in-right-rank nodes and extra nodes
         if i == num_part - 1:
             std_train_node_num = len(train_idx) - rank_train_node_num * (num_part - 1)
-            std_other_node_num = node_num - rank_node_num * (num_part - 1)
-            std_other_node_num -= std_train_node_num
+            std_valid_node_num = len(valid_idx) - rank_valid_node_num * (num_part - 1)
+            std_test_node_num = len(test_idx) - rank_test_node_num * (num_part - 1)
+            std_other_node_num = node_num - (num_part - 1) * rank_node_num
+            std_other_node_num -= std_train_node_num + std_valid_node_num + std_test_node_num
+            std_num = [std_other_node_num, std_train_node_num, std_valid_node_num, std_test_node_num]
         else:
-            std_train_node_num = rank_train_node_num
-            std_other_node_num = rank_valid_test_node_num
+            std_num = [rank_other_node_num, rank_train_node_num, rank_valid_node_num, rank_test_node_num]
         my_rank_start = dgl_part_off[i]
         my_rank_end = dgl_part_off[i + 1]
         for j in range(my_rank_start, my_rank_end):
             origin_id = new2origin_node_map[j]
             label_type = originid2labeltype[origin_id]
-            if label_type == 1:  # this is a train node
-                if real_ranks_train_nodes[i] >= std_train_node_num:  # push back to extra
-                    extra_train_nodes.append(origin_id)
-                else:
-                    ranks_node_id[i].append(origin_id)
-                    real_ranks_train_nodes[i] += 1
-            else:  # valid node or test node
-                if real_ranks_other_nodes[i] >= std_other_node_num:
-                    extra_other_nodes.append(origin_id)
-                else:
-                    ranks_node_id[i].append(origin_id)
-                    real_ranks_other_nodes[i] += 1
+            if real_ranks_nodes[i][label_type] >= std_num[label_type]:
+                extra_nodes[label_type].append(origin_id)
+            else:
+                real_ranks_nodes[i][label_type] += 1
+                ranks_node_id[i].append(origin_id)
     for i in range(num_part):  # fullfill those unfilled ranks with extra nodes
         if i == num_part - 1:
             std_train_node_num = len(train_idx) - rank_train_node_num * (num_part - 1)
-            std_other_node_num = node_num - rank_node_num * (num_part - 1)
-            std_other_node_num -= std_train_node_num
+            std_valid_node_num = len(valid_idx) - rank_valid_node_num * (num_part - 1)
+            std_test_node_num = len(test_idx) - rank_test_node_num * (num_part - 1)
+            std_other_node_num = node_num - (num_part - 1) * rank_node_num
+            std_other_node_num -= std_train_node_num + std_valid_node_num + std_test_node_num
+            std_num = [std_other_node_num, std_train_node_num, std_valid_node_num, std_test_node_num]
         else:
-            std_train_node_num = rank_train_node_num
-            std_other_node_num = rank_valid_test_node_num
-        needed_train_nodes = std_train_node_num - real_ranks_train_nodes[i]
-        needed_other_nodes = std_other_node_num - real_ranks_other_nodes[i]
-        if needed_train_nodes > 0:
-            assert len(extra_train_nodes) >= needed_train_nodes
-            ranks_node_id[i] += extra_train_nodes[:needed_train_nodes]
-            extra_train_nodes = extra_train_nodes[needed_train_nodes:]
-        if needed_other_nodes > 0:
-            assert len(extra_other_nodes) >= needed_other_nodes
-            ranks_node_id[i] += extra_other_nodes[:needed_other_nodes]
-            extra_other_nodes = extra_other_nodes[needed_other_nodes:]
-    assert len(extra_other_nodes) == 0
-    assert len(extra_train_nodes) == 0
+            std_num = [rank_other_node_num, rank_train_node_num, rank_valid_node_num, rank_test_node_num]
+        for j in range(4):
+            needed_nodes = std_num[j] - real_ranks_nodes[i][j]
+            if needed_nodes > 0:
+                assert len(extra_nodes[j]) >= needed_nodes
+                ranks_node_id[i] += extra_nodes[j][:needed_nodes]
+                extra_nodes[j] = extra_nodes[j][needed_nodes:]
+
+    for i in range(4):
+        assert len(extra_nodes[i]) == 0
 
     for i in range(num_part - 1):
         assert len(ranks_node_id[i]) == rank_node_num
@@ -320,7 +314,7 @@ if __name__ == '__main__':
         )
         # graph partition
         node_map = graph_partition(args, graph).numpy()
-        np.save("node_map_ogbn_products.npy", node_map)
+        np.save('node_map_' + str(args.dataset) + '.npy', node_map)
     else:
         node_map = np.load('node_map_' + str(args.dataset) + '.npy')
     gp_start = time.time()
