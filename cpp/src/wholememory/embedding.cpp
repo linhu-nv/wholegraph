@@ -20,6 +20,13 @@
 #include <wholememory/env_func_ptrs.h>
 #include <wholememory/wholememory_op.h>
 
+// #include <thrust.h>
+#include <thrust/copy.h>
+#include <thrust/count.h>
+#include <thrust/device_ptr.h>
+#include <thrust/device_vector.h>
+#include <thrust/execution_policy.h>
+
 #include <memory>
 
 #include "cuda_macros.hpp"
@@ -689,6 +696,9 @@ wholememory_error_code_t local_cached_global_readonly_embedding::gather(
   wholememory_env_func_t* p_env_fns,
   cudaStream_t stream) noexcept
 {
+  clock_t end, start, end1, start1;
+  double cache_adjust, cache_gather, all_gather, total_time;
+  start = clock();
   WHOLEMEMORY_CHECK_NOTHROW(cache_policy->cache_memory_type != WHOLEMEMORY_MT_DISTRIBUTED);
   auto* indice_desc = wholememory_tensor_get_tensor_description(indices);
   auto* output_desc = wholememory_tensor_get_tensor_description(output);
@@ -706,6 +716,7 @@ wholememory_error_code_t local_cached_global_readonly_embedding::gather(
   int64_t* dev_raw_indice_ptr          = nullptr;
   int64_t total_recv_count             = 0;
   // Actually, WHOLEMEMORY_MT_DISTRIBUTED is actully not supported now
+  start1 = clock();
   if (adjust_cache) {
     WHOLEMEMORY_RETURN_ON_FAIL(
       wholememory_communicator_get_size(&cache_world_size, cache_policy->cache_comm));
@@ -754,6 +765,9 @@ wholememory_error_code_t local_cached_global_readonly_embedding::gather(
       WHOLEMEMORY_RETURN_ON_FAIL(wholememory_communicator_barrier(cache_policy->cache_comm));
     }
   }
+  cudaDeviceSynchronize();
+  end1         = clock();
+  cache_adjust = (double)(end1 - start1) / CLOCKS_PER_SEC;
   wholememory_gref_t cached_gref, cached_line_tag_gref;
   WHOLEMEMORY_RETURN_ON_FAIL(
     wholememory_tensor_get_global_reference(cache_ptr_->cache_line_data_wm_tensor_, &cached_gref));
@@ -762,6 +776,7 @@ wholememory_error_code_t local_cached_global_readonly_embedding::gather(
   wholememory_ops::temp_memory_handle dev_miss_ids_handle(p_env_fns);
   void* dev_miss_ids_ptr =
     dev_miss_ids_handle.device_malloc(indice_desc->sizes[0], indice_desc->dtype);
+  start1 = clock();
   WHOLEMEMORY_RETURN_ON_FAIL(wholememory_ops::try_gather_cached_func(
     cached_gref,
     wholememory_tensor_get_tensor_description(cache_ptr_->cache_line_data_wm_tensor_),
@@ -775,13 +790,40 @@ wholememory_error_code_t local_cached_global_readonly_embedding::gather(
     cache_ptr_->get_cache_set_coverage(),
     0,
     stream));
+  cudaDeviceSynchronize();
+  end1         = clock();
+  cache_gather = (double)(end1 - start1) / CLOCKS_PER_SEC;
+  start1       = clock();
   wholememory_tensor_t missed_indices_tensor;
   WHOLEMEMORY_RETURN_ON_FAIL(
     wholememory_make_tensor_from_pointer(&missed_indices_tensor, dev_miss_ids_ptr, indice_desc));
   WHOLEMEMORY_RETURN_ON_FAIL(
     wholememory_gather(allocated_embedding, missed_indices_tensor, output, p_env_fns, stream));
   WHOLEMEMORY_RETURN_ON_FAIL(wholememory_destroy_tensor(missed_indices_tensor));
-
+  cudaDeviceSynchronize();
+  end        = clock();
+  all_gather = (double)(end - start1) / CLOCKS_PER_SEC;
+  total_time = (double)(end - start) / CLOCKS_PER_SEC;
+  // thrust::device_ptr<int> my_ptr = thrust::device_pointer_cast((int *)dev_miss_ids_ptr);
+  int* h_idx = new int[indice_desc->sizes[0]];
+  cudaMemcpy(h_idx, dev_miss_ids_ptr, sizeof(int) * indice_desc->sizes[0], cudaMemcpyDeviceToHost);
+  cudaDeviceSynchronize();
+  int cache_hit_num = thrust::count(thrust::host, h_idx, h_idx + indice_desc->sizes[0], -1);
+  delete[] h_idx;
+  // thrust::device_vector<int> v(indice_desc->sizes[0]);
+  // thrust::copy(my_ptr, my_ptr + indice_desc->sizes[0], v.begin());
+  // int cache_hit_num = thrust::count(thrust::device, my_ptr, my_ptr + indice_desc->sizes[0], -1);
+  printf("%ld", sizeof(indice_desc->dtype));
+  // int cache_hit_num = 0;
+  printf(
+    "cache adjust time %lf, cache gather time %lf, total gather time %lf, all time %lf, hit %d out "
+    "of %ld\n",
+    cache_adjust,
+    cache_gather,
+    all_gather,
+    total_time,
+    cache_hit_num,
+    indice_desc->sizes[0]);
   return WHOLEMEMORY_SUCCESS;
 }
 
