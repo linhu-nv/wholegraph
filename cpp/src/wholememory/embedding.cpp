@@ -29,6 +29,7 @@
 
 #include <memory>
 
+#include "communicator.hpp"
 #include "cuda_macros.hpp"
 #include "embedding.hpp"
 #include "embedding_optimizer.hpp"
@@ -698,7 +699,6 @@ wholememory_error_code_t local_cached_global_readonly_embedding::gather(
   wholememory_env_func_t* p_env_fns,
   cudaStream_t stream) noexcept
 {
-  gather_times++;
   clock_t end, start, end1, start1;
   double cache_adjust, cache_gather, all_gather, total_time;
   start = clock();
@@ -720,7 +720,17 @@ wholememory_error_code_t local_cached_global_readonly_embedding::gather(
   int64_t total_recv_count             = 0;
   // Actually, WHOLEMEMORY_MT_DISTRIBUTED is actully not supported now
   start1 = clock();
-  if (adjust_cache && gather_times % 10 < 3) {
+  if (gather_times > 5) {
+    float last_5_sum = 0.0;
+    for (int p = gather_times - 2; p >= gather_times - 6; p--) {
+      last_5_sum += recent_hit_rate[p];
+    }
+    bool need_update_cache = false;
+    if (recent_hit_rate[gather_times - 1] / (last_5_sum / 5) < 0.9) { need_update_cache = true; }
+    adjust_cache =
+      adjust_cache && wm_comm_check_if_any<bool>(raw_embedding_comm_, need_update_cache);
+  }
+  if (adjust_cache) {
     WHOLEMEMORY_RETURN_ON_FAIL(
       wholememory_communicator_get_size(&cache_world_size, cache_policy->cache_comm));
     WHOLEMEMORY_RETURN_ON_FAIL(
@@ -828,6 +838,7 @@ wholememory_error_code_t local_cached_global_readonly_embedding::gather(
     total_time,
     cache_hit_num,
     indice_desc->sizes[0]);
+  gather_times++;
   return WHOLEMEMORY_SUCCESS;
 }
 

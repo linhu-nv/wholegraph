@@ -232,6 +232,28 @@ inline bool wm_comm_check_all_same(wholememory_comm_t comm, const TypeT& t)
   return true;
 }
 
+template <typename TypeT>
+inline bool wm_comm_check_if_any(wholememory_comm_t comm, const TypeT& t)
+{
+  std::unique_ptr<TypeT[]> t_array(new TypeT[comm->world_size]());
+  comm->host_allgather(&t, t_array.get(), sizeof(TypeT), WHOLEMEMORY_DT_INT8);
+  for (int r = 0; r < comm->world_size; r++) {
+    if (t_array.get()[r] == 1) return true;
+  }
+  return false;
+}
+
+template <typename TypeT>
+inline bool wm_comm_check_if_all(wholememory_comm_t comm, const TypeT& t)
+{
+  std::unique_ptr<TypeT[]> t_array(new TypeT[comm->world_size]());
+  comm->host_allgather(&t, t_array.get(), sizeof(TypeT), WHOLEMEMORY_DT_INT8);
+  for (int r = 0; r < comm->world_size; r++) {
+    if (t_array.get()[r] == 0) return false;
+  }
+  return true;
+}
+
 template <>
 inline bool wm_comm_check_all_same(wholememory_comm_t comm, const std::string& str)
 {
