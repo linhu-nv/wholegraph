@@ -680,7 +680,9 @@ wholememory_error_code_t device_cached_host_embedding::gather(wholememory_tensor
 
 class local_cached_global_readonly_embedding : public embedding_base {
  public:
-  local_cached_global_readonly_embedding()          = default;
+  int gather_times;
+  std::vector<float> recent_hit_rate;
+  local_cached_global_readonly_embedding() : embedding_base() { gather_times = 0; }
   virtual ~local_cached_global_readonly_embedding() = default;
   wholememory_error_code_t gather(wholememory_tensor_t indices,
                                   wholememory_tensor_t output,
@@ -696,6 +698,7 @@ wholememory_error_code_t local_cached_global_readonly_embedding::gather(
   wholememory_env_func_t* p_env_fns,
   cudaStream_t stream) noexcept
 {
+  gather_times++;
   clock_t end, start, end1, start1;
   double cache_adjust, cache_gather, all_gather, total_time;
   start = clock();
@@ -717,7 +720,7 @@ wholememory_error_code_t local_cached_global_readonly_embedding::gather(
   int64_t total_recv_count             = 0;
   // Actually, WHOLEMEMORY_MT_DISTRIBUTED is actully not supported now
   start1 = clock();
-  if (adjust_cache) {
+  if (adjust_cache && gather_times % 10 < 3) {
     WHOLEMEMORY_RETURN_ON_FAIL(
       wholememory_communicator_get_size(&cache_world_size, cache_policy->cache_comm));
     WHOLEMEMORY_RETURN_ON_FAIL(
@@ -813,8 +816,9 @@ wholememory_error_code_t local_cached_global_readonly_embedding::gather(
   // thrust::device_vector<int> v(indice_desc->sizes[0]);
   // thrust::copy(my_ptr, my_ptr + indice_desc->sizes[0], v.begin());
   // int cache_hit_num = thrust::count(thrust::device, my_ptr, my_ptr + indice_desc->sizes[0], -1);
-  printf("%ld", sizeof(indice_desc->dtype));
+  // printf("%ld", sizeof(indice_desc->dtype));
   // int cache_hit_num = 0;
+  recent_hit_rate.push_back((float)cache_hit_num / indice_desc->sizes[0]);
   printf(
     "cache adjust time %lf, cache gather time %lf, total gather time %lf, all time %lf, hit %d out "
     "of %ld\n",
