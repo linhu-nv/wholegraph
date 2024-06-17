@@ -24,6 +24,10 @@
 #include "wholememory/communicator.hpp"
 #include "wholememory_ops/register.hpp"
 
+#include <thrust/device_vector.h>
+#include <thrust/sort.h>
+#include <thrust/unique.h>
+
 namespace wholememory_ops {
 
 template <typename IndexT>
@@ -39,6 +43,16 @@ struct UnsignedType<int64_t> {
   using UType = uint64_t;
 };
 
+struct comm_infos {
+  size_t ele_num;
+  size_t ele_num_after_group;
+  int time;
+
+  comm_infos(size_t e1, size_t e2, int t) : ele_num(e1), ele_num_after_group(e2), time(t) {}
+};
+
+comm_infos commInfo(0, 0, 0);
+
 template <typename IndexT>
 void exchange_ids_temp_func(const void* indices_before_sort,
                             wholememory_array_description_t indices_desc,
@@ -50,6 +64,7 @@ void exchange_ids_temp_func(const void* indices_before_sort,
                             int64_t* raw_indices,
                             wholememory_comm_t wm_comm,
                             wm_thrust_allocator* p_thrust_allocator,
+                            wholememory_env_func_t* p_env_fns,
                             cudaStream_t stream)
 {
   auto index_type = indices_desc.dtype;
@@ -112,6 +127,41 @@ void exchange_ids_temp_func(const void* indices_before_sort,
   allocator.deallocate(reinterpret_cast<char*>(seq_indices),
                        wholememory_get_memory_size_from_array(&indices_desc));
   allocator.deallocate(static_cast<char*>(cub_temp_storage), temp_storage_bytes);
+
+  commInfo.ele_num += total_recv_count;
+  temp_memory_handle dev_recv_indice_copy(p_env_fns);
+  IndexT* dev_recv_indice_copy_ptr =
+    static_cast<IndexT*>(dev_recv_indice_copy.device_malloc(total_recv_count, indices_desc.dtype));
+  WM_CUDA_CHECK(cudaMemcpyAsync(dev_recv_indice_copy_ptr,
+                                dev_recv_indice_buffer_ptr,
+                                sizeof(indices_desc.dtype) * total_recv_count,
+                                cudaMemcpyDeviceToDevice,
+                                stream));
+  WM_CUDA_CHECK(cudaStreamSynchronize(stream));
+  int node_gpu_num     = 8;
+  int group_idx_start  = 0;
+  int unique_ele_total = 0;
+
+  for (int gid = 0; gid < world_size / node_gpu_num; gid++) {
+    int cur_group_idx_num = 0;
+    for (int i = 0; i < node_gpu_num; i++) {
+      cur_group_idx_num += host_recv_rank_id_count_ptr[gid * node_gpu_num + i];
+    }
+    thrust::device_ptr<IndexT> cur_ind_ptr(dev_recv_indice_copy_ptr + group_idx_start);
+    thrust::sort(thrust::cuda::par.on(stream), cur_ind_ptr, cur_ind_ptr + cur_group_idx_num);
+    thrust::device_ptr<IndexT> new_end =
+      thrust::unique(thrust::cuda::par.on(stream), cur_ind_ptr, cur_ind_ptr + cur_group_idx_num);
+    int unique_count = new_end - cur_ind_ptr;
+    unique_ele_total += unique_count;
+    group_idx_start += cur_group_idx_num;
+  }
+  commInfo.ele_num += unique_ele_total;
+  commInfo.time += 1;
+  if (commInfo.time % 10 == 0) {
+    printf("commInfo total comm %ld, %ld comm after grouping\n",
+           commInfo.ele_num,
+           commInfo.ele_num_after_group);
+  }
 }
 
 REGISTER_DISPATCH_ONE_TYPE(ExchangeIDsNCCL, exchange_ids_temp_func, SINT3264)
@@ -126,6 +176,7 @@ wholememory_error_code_t exchange_ids_func(const void* indices_before_sort,
                                            int64_t* raw_indices,
                                            wholememory_comm_t wm_comm,
                                            wm_thrust_allocator* p_thrust_allocator,
+                                           wholememory_env_func_t* p_env_fns,
                                            cudaStream_t stream)
 {
   try {
@@ -141,6 +192,7 @@ wholememory_error_code_t exchange_ids_func(const void* indices_before_sort,
                       raw_indices,
                       wm_comm,
                       p_thrust_allocator,
+                      p_env_fns,
                       stream);
   } catch (wholememory::cuda_error& wce) {
     WHOLEMEMORY_ERROR("exchange_ids_func CUDA LOGIC Error %s\n", wce.what());
@@ -220,6 +272,7 @@ wholememory_error_code_t bucket_and_exchange_ids_func(
                                                dev_raw_indice_ptr,
                                                wm_comm,
                                                p_thrust_allocator,
+                                               p_env_fns,
                                                stream));
   WM_CUDA_DEBUG_SYNC_STREAM(stream);
   return WHOLEMEMORY_SUCCESS;
