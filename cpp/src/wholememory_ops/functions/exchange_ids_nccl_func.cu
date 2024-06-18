@@ -155,9 +155,9 @@ void exchange_ids_temp_func(const void* indices_before_sort,
     unique_ele_total += unique_count;
     group_idx_start += cur_group_idx_num;
   }
-  commInfo.ele_num += unique_ele_total;
+  commInfo.ele_num_after_group += unique_ele_total;
   commInfo.time += 1;
-  if (commInfo.time % 10 == 0) {
+  if (commInfo.time % 1000 == 0) {
     printf("commInfo total comm %ld, %ld comm after grouping\n",
            commInfo.ele_num,
            commInfo.ele_num_after_group);
