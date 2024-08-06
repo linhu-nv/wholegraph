@@ -343,7 +343,10 @@ void wholegraph_csr_unweighted_sample_without_replacement_func(
                                 cudaMemcpyDeviceToHost,
                                 stream));
   WM_CUDA_CHECK(cudaStreamSynchronize(stream));
-  if (count == 0) return;
+  if (count == 0) {
+    printf("warning: this sample returns empty results.\n");
+    return;
+  }
 
   wholememory_ops::output_memory_handle gen_output_dest_buffer_mh(p_env_fns,
                                                                   output_dest_memory_context);
