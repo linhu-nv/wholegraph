@@ -317,6 +317,11 @@ void wholegraph_csr_unweighted_sample_without_replacement_func(
   int* tmp_sample_count_mem_pointer =
     (int*)gen_buffer_tmh.device_malloc(center_node_count + 1, WHOLEMEMORY_DT_INT);
 
+  if (center_node_count == 0) {
+    printf("warning: this sample returns empty results.\n");
+    return;
+  }
+
   int thread_x    = 32;
   int block_count = raft::div_rounding_up_safe<int>(center_node_count, thread_x);
 
