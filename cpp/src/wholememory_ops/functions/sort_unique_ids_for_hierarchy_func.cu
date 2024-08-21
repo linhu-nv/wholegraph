@@ -33,6 +33,7 @@
 #include "wholememory/integer_utils.hpp"
 #include "wholememory_ops/register.hpp"
 #include "wholememory_ops/temp_memory_handle.hpp"
+#include <nvtx3/nvToolsExt.h>
 #include <wholememory_ops/thrust_allocator.hpp>
 
 namespace wholememory_ops {

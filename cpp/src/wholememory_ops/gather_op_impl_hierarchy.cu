@@ -28,6 +28,7 @@
 #include "wholememory_ops/gather_op_impl.h"
 #include "wholememory_ops/temp_memory_handle.hpp"
 #include "wholememory_ops/thrust_allocator.hpp"
+#include <nvtx3/nvToolsExt.h>
 
 namespace wholememory_ops {
 
@@ -125,6 +126,7 @@ wholememory_error_code_t wholememory_gather_hierarchy(
   cudaStream_t stream,
   int gather_sms)
 {
+  nvtxRangePush("wholememory_gather_hierarchy");
   try {
     if (wholememory_desc.storage_offset < 0 ||
         wholememory_desc.storage_offset + wholememory_desc.sizes[1] > wholememory_desc.stride) {
@@ -183,7 +185,7 @@ wholememory_error_code_t wholememory_gather_hierarchy(
     std::vector<int64_t> host_bucket_id_offset(local_size);
     std::vector<int64_t> host_recv_id_count(local_size, 0);
     std::vector<int64_t> host_recv_id_offset(local_size);
-
+    nvtxRangePush("bucket_and_reorder_ids");
     // bucket indices
     WHOLEMEMORY_RETURN_ON_FAIL(
       bucket_and_reorder_ids_for_hierarchy_func(indices,
@@ -199,6 +201,8 @@ wholememory_error_code_t wholememory_gather_hierarchy(
                                                 p_env_fns,
                                                 stream));
     WM_CUDA_CHECK(cudaStreamSynchronize(stream));
+    nvtxRangePop();
+    nvtxRangePush("exchange node_count and indices");
     // exchange node count
     wm_local_comm->host_alltoall(
       host_bucket_id_count.data(), host_recv_id_count.data(), 1, WHOLEMEMORY_DT_INT64);
@@ -227,12 +231,14 @@ wholememory_error_code_t wholememory_gather_hierarchy(
                              stream);
     wm_local_comm->sync_stream(stream);
     WM_CUDA_CHECK(cudaGetLastError());
+    nvtxRangePop();
     // sort unique / bucket recv indices
     temp_memory_handle cross_gather_indices_handle(p_env_fns);
     wholememory_array_description_t cross_gather_indices_desc;
     temp_memory_handle dev_cross_gather_id_map_handle(p_env_fns);
     std::vector<int64_t> host_cross_bucket_id_count(cross_size, 0);
     if (sort_unique_indices) {
+      nvtxRangePush("sort unique ids for hierarchy"));
       sort_unique_ids_for_hierarchy_func(dev_recv_bucket_indices_ptr,
                                          recv_bucket_indices_desc,
                                          &cross_gather_indices_handle,
@@ -241,6 +247,8 @@ wholememory_error_code_t wholememory_gather_hierarchy(
                                          &thrust_allocator,
                                          p_env_fns,
                                          stream);
+      nvtxRangePop();
+      nvtxRangePush("bucket local ids");
       bucket_local_ids_func(cross_gather_indices_handle.pointer(),
                             cross_gather_indices_desc,
                             host_cross_bucket_id_count.data(),
@@ -250,7 +258,9 @@ wholememory_error_code_t wholememory_gather_hierarchy(
                             &thrust_allocator,
                             p_env_fns,
                             stream);
+      nvtxRangePop();
     } else {
+      nvtxRangePush("bucket local ids for hierarchy func");
       void* cross_gather_indices_ptr = cross_gather_indices_handle.device_malloc(
         recv_bucket_indices_desc.size, recv_bucket_indices_desc.dtype);
       void* dev_cross_gather_id_map_ptr = dev_cross_gather_id_map_handle.device_malloc(
@@ -269,9 +279,11 @@ wholememory_error_code_t wholememory_gather_hierarchy(
                                                   &thrust_allocator,
                                                   p_env_fns,
                                                   stream));
+      nvtxRangePop();
     }
     WM_CUDA_CHECK(cudaStreamSynchronize(stream));
     // cross gather
+    nvtxRangePush("cross gather");
     temp_memory_handle dev_cross_gather_buffer_handle(p_env_fns);
     void* dev_cross_gather_buffer_ptr = dev_cross_gather_buffer_handle.device_malloc(
       wholememory_desc.sizes[1] * cross_gather_indices_desc.size, output_desc.dtype);
@@ -293,7 +305,10 @@ wholememory_error_code_t wholememory_gather_hierarchy(
                              p_env_fns,
                              stream,
                              gather_sms);
+    
+    nvtxRangePop();
     // cross gather reorder
+    nvtxRangePush("cross gather reorder");
     temp_memory_handle dev_embedding_map_buffer_handle(p_env_fns);
     void* dev_embedding_map_buffer_ptr = dev_embedding_map_buffer_handle.device_malloc(
       wholememory_desc.sizes[1] * total_recv_count, output_desc.dtype);
@@ -310,7 +325,9 @@ wholememory_error_code_t wholememory_gather_hierarchy(
                                            embedding_map_buffer_desc,
                                            stream,
                                            gather_sms));
+    nvtxRangePop();
     // exchange embeddings
+    nvtxRangePush("exchange embeddings");
     size_t output_embedding_size =
       wholememory_desc.sizes[1] * wholememory_dtype_get_element_size(output_desc.dtype);
     temp_memory_handle dev_recv_embedding_buffer_handle(p_env_fns);
@@ -323,7 +340,9 @@ wholememory_error_code_t wholememory_gather_hierarchy(
                                                              output_embedding_size,
                                                              wm_local_comm,
                                                              stream));
+    nvtxRangePop();
     // bucket reorder
+    nvtxRangePush("bucket reorder");
     wholememory_gref_t recv_embedding_buffer_fake_gref =
       wholememory_create_continuous_global_reference(dev_recv_embedding_buffer_ptr);
     int64_t recv_embedding_buffer_size[2] = {indice_desc.size, wholememory_desc.sizes[1]};
@@ -337,6 +356,7 @@ wholememory_error_code_t wholememory_gather_hierarchy(
                                            output_desc,
                                            stream,
                                            gather_sms));
+    nvtxRangePop();
     WM_CUDA_CHECK(cudaGetLastError());
   } catch (wholememory::cuda_error& wce) {
     WHOLEMEMORY_ERROR("CUDA logic Error %s\n", wce.what());
@@ -347,7 +367,7 @@ wholememory_error_code_t wholememory_gather_hierarchy(
   } catch (...) {
     return WHOLEMEMORY_UNKNOW_ERROR;
   }
-
+  nvtxRangePush("wholememory_gather_hierarchy");
   return WHOLEMEMORY_SUCCESS;
 }
 

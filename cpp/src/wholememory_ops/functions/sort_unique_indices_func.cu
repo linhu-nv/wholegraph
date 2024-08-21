@@ -25,6 +25,7 @@
 #include "error.hpp"
 #include "logger.hpp"
 #include "wholememory_ops/register.hpp"
+#include <nvtx3/nvToolsExt.h>
 
 namespace wholememory_ops {
 
@@ -45,10 +46,11 @@ void SortUniqueIndicesTempFunc(const void* indices,
   temp_memory_handle sorted_indices_handle(p_env_fns);
   sorted_indices_handle.device_malloc(indice_desc.size, indice_desc.dtype);
   IndexT* sorted_indices = static_cast<IndexT*>(sorted_indices_handle.pointer());
-
+  nvtxRangePush("sort indices");
   sort_indices_func(
     indices, indice_desc, sorted_indices, sort_raw_indices, p_thrust_allocator, p_env_fns, stream);
-
+  nvtxRangePop();
+  nvtxRangePush("unique indices");
   unique_indices_handle->device_malloc(indice_desc.size, indice_desc.dtype);
   unique_count_handle->device_malloc(indice_desc.size, WHOLEMEMORY_DT_INT);
   IndexT* unique_indices = static_cast<IndexT*>(unique_indices_handle->pointer());
@@ -75,6 +77,7 @@ void SortUniqueIndicesTempFunc(const void* indices,
                                      number_runs,
                                      indice_desc.size,
                                      stream);
+  nvtxRangePop();
   WM_CUDA_CHECK_NO_THROW(
     cudaMemcpyAsync(num_runs, number_runs, sizeof(int), cudaMemcpyDeviceToHost, stream));
 }
