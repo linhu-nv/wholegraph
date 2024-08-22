@@ -126,7 +126,7 @@ wholememory_error_code_t wholememory_gather_hierarchy(
   cudaStream_t stream,
   int gather_sms)
 {
-  // nvtxRangePush("wholememory_gather_hierarchy");
+  nvtxRangePush("wholememory_gather_hierarchy");
   try {
     if (wholememory_desc.storage_offset < 0 ||
         wholememory_desc.storage_offset + wholememory_desc.sizes[1] > wholememory_desc.stride) {

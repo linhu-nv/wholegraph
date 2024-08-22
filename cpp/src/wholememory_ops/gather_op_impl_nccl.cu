@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2019-2023, NVIDIA CORPORATION.
+ * Copyright (c) 2019-2024, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -28,6 +28,7 @@
 #include "wholememory_ops/gather_op_impl.h"
 #include "wholememory_ops/temp_memory_handle.hpp"
 #include "wholememory_ops/thrust_allocator.hpp"
+#include <nvtx3/nvToolsExt.h>
 
 namespace wholememory_ops {
 
@@ -41,6 +42,7 @@ wholememory_error_code_t wholememory_gather_nccl(wholememory_handle_t wholememor
                                                  cudaStream_t stream,
                                                  int gather_sms)
 {
+  nvtxRangePush("wholememory_gather_nccl");
   try {
     if (wholememory_desc.storage_offset < 0 ||
         wholememory_desc.storage_offset + wholememory_desc.sizes[1] > wholememory_desc.stride) {
@@ -83,6 +85,7 @@ wholememory_error_code_t wholememory_gather_nccl(wholememory_handle_t wholememor
       static_cast<int64_t*>(dev_raw_indice.device_malloc(indice_desc.size, WHOLEMEMORY_DT_INT64));
 
     int64_t total_recv_count = 0;
+    nvtxRangePush("bucket_and_exchange_ids_func");
     WHOLEMEMORY_RETURN_ON_FAIL(bucket_and_exchange_ids_func(indices,
                                                             indice_desc,
                                                             host_recv_rank_id_count_ptr,
@@ -95,7 +98,9 @@ wholememory_error_code_t wholememory_gather_nccl(wholememory_handle_t wholememor
                                                             p_env_fns,
                                                             stream));
 
+    nvtxRangePop();
     // Local Gather
+    nvtxRangePush("local_gather");
     for (int i = 0; i < world_size; i++) {
       total_recv_count += host_recv_rank_id_count_ptr[i];
     }
@@ -125,7 +130,9 @@ wholememory_error_code_t wholememory_gather_nccl(wholememory_handle_t wholememor
                                            local_gather_buffer_desc,
                                            stream,
                                            gather_sms));
+    nvtxRangePop();
     // AllToAllV for embeddings
+    nvtxRangePush("exchange_embeddings_nccl");
     size_t embedding_size =
       wholememory_desc.sizes[1] * wholememory_dtype_get_element_size(output_desc.dtype);
     WHOLEMEMORY_RETURN_ON_FAIL(exchange_embeddings_nccl_func(dev_local_gather_buffer_ptr,
@@ -135,7 +142,9 @@ wholememory_error_code_t wholememory_gather_nccl(wholememory_handle_t wholememor
                                                              embedding_size,
                                                              wm_comm,
                                                              stream));
+    nvtxRangePop();
     // Local reorder
+    nvtxRangePush("local_reorder");
     int64_t total_need_indice_count = 0;
     for (int i = 0; i < world_size; i++) {
       total_need_indice_count += host_rank_id_count_ptr[i];
@@ -154,6 +163,7 @@ wholememory_error_code_t wholememory_gather_nccl(wholememory_handle_t wholememor
                                             output_desc,
                                             stream));
     WM_CUDA_CHECK(cudaGetLastError());
+    nvtxRangePop();
     // WM_CUDA_CHECK(cudaStreamSynchronize(stream));
   } catch (wholememory::cuda_error& wce) {
     WHOLEMEMORY_ERROR("CUDA logic Error %s\n", wce.what());
@@ -164,7 +174,7 @@ wholememory_error_code_t wholememory_gather_nccl(wholememory_handle_t wholememor
   } catch (...) {
     return WHOLEMEMORY_UNKNOW_ERROR;
   }
-
+  nvtxRangePop();
   return WHOLEMEMORY_SUCCESS;
 }
 
