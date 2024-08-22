@@ -23,6 +23,7 @@
 #include "logger.hpp"
 #include "wholememory/communicator.hpp"
 #include "wholememory_ops/register.hpp"
+#include <nvtx3/nvToolsExt.h>
 
 namespace wholememory_ops {
 
@@ -174,7 +175,7 @@ wholememory_error_code_t bucket_and_exchange_ids_func(
   temp_memory_handle dev_rank_id_count(p_env_fns);
   int64_t* dev_rank_id_count_ptr =
     static_cast<int64_t*>(dev_rank_id_count.device_malloc(world_size, WHOLEMEMORY_DT_INT64));
-
+  nvtxRangePush("exchange node count");
   WHOLEMEMORY_RETURN_ON_FAIL(bucket_ids_for_ranks(indices,
                                                   indice_desc,
                                                   dev_rank_id_count_ptr,
@@ -206,6 +207,8 @@ wholememory_error_code_t bucket_and_exchange_ids_func(
   }
   WHOLEMEMORY_EXPECTS(wm_comm->sync_stream() == WHOLEMEMORY_SUCCESS,
                       "Rank id count AllToAll failed.");
+  nvtxRangePop();
+  nvtxRangePush("exchange ids");
   void* indice_ptr =
     static_cast<char*>(indices) +
     wholememory_dtype_get_element_size(indice_desc.dtype) * indice_desc.storage_offset;
@@ -222,6 +225,7 @@ wholememory_error_code_t bucket_and_exchange_ids_func(
                                                p_thrust_allocator,
                                                stream));
   WM_CUDA_DEBUG_SYNC_STREAM(stream);
+  nvtxRangePop();
   return WHOLEMEMORY_SUCCESS;
 }
 
