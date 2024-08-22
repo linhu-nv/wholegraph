@@ -67,6 +67,7 @@ void SortUniqueIndicesMapTempFunc(void* indice_map,
                                   wholememory_env_func_t* p_env_fns,
                                   cudaStream_t stream)
 {
+  nvtxRangePush("sort unique indices map");
   static constexpr int BLOCK_SIZE = 128;
   int block_count                 = wholememory::div_rounding_up_unsafe(num_unique, BLOCK_SIZE);
 
@@ -90,6 +91,7 @@ void SortUniqueIndicesMapTempFunc(void* indice_map,
                                                                     unique_offset_ptr,
                                                                     num_unique);
   p_thrust_allocator->deallocate(reinterpret_cast<char*>(cub_temp_storage), temp_storage_bytes);
+  nvtxRangePop();
 }
 
 REGISTER_DISPATCH_ONE_TYPE(SortUniqueIndicesMapTempFunc, SortUniqueIndicesMapTempFunc, SINT3264)
