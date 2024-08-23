@@ -238,7 +238,7 @@ wholememory_error_code_t wholememory_gather_hierarchy(
     temp_memory_handle dev_cross_gather_id_map_handle(p_env_fns);
     std::vector<int64_t> host_cross_bucket_id_count(cross_size, 0);
     if (sort_unique_indices) {
-      nvtxRangePush("sort unique ids for hierarchy"));
+      nvtxRangePush("sort unique ids for hierarchy");
       sort_unique_ids_for_hierarchy_func(dev_recv_bucket_indices_ptr,
                                          recv_bucket_indices_desc,
                                          &cross_gather_indices_handle,
@@ -305,7 +305,7 @@ wholememory_error_code_t wholememory_gather_hierarchy(
                              p_env_fns,
                              stream,
                              gather_sms);
-    
+
     nvtxRangePop();
     // cross gather reorder
     nvtxRangePush("cross gather reorder");
